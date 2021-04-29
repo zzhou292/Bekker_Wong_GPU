@@ -1,1 +1,1 @@
-nvcc driver.cu BWTerrain.cu BWWheel.cu -Xcompiler -O3 -Xcompiler -Wall -o task
+nvcc driver.cu BWTerrain.cu BWWheel.cu -Xcompiler -O3 -Xcompiler -Wall -lboost_system -lboost_filesystem -o task 
