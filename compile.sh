@@ -1,0 +1,1 @@
+nvcc driver.cu BWTerrain.cu BWWheel.cu -Xcompiler -O3 -Xcompiler -Wall -o task
