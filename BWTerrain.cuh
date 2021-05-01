@@ -25,29 +25,44 @@ class BWTerrain {
     float* gpu_y_arr;  // gpu pos y arr
     float* gpu_z_arr;  // gpu pos z arr
 
-    float area;
+    float area;  // patch area
 
-    int n_node;
-    int x_n_node;
-    int y_n_node;
+    int n_node;    // total number of node
+    int x_n_node;  // number of node along the x direction
+    int y_n_node;  // numbder of node along the y direction
 
-    BWParameters* terrain_params;
+    BWParameters* terrain_params;  // Bekker Wong Terrain parameters
 
-    // private utility functions
+    // Utility function to find active vertices
     std::vector<int> Util_Find_Active(float x_min, float x_max, float y_min, float y_max);
+
+    // Utility function to perform force calculation
     void Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWheel* wheel);
 
   public:
     BWTerrain(float x_in, float y_in, float resolution_in);
+
+    // return x size of the terrain
     float Get_X_Size() { return x; }
+
+    // return y size of the terrain
     float Get_Y_Size() { return y; }
+
+    // return the resolution of the terrain
     float Get_Resolution() { return resolution; }
 
+    // initialization of the BWTerrain
     void Initialize();
+
+    // Write out OBJ Wavefront mesh representation of the terrain
     void WriteOutput(std::string FileName);
+
+    // Advance the simulation by time_step
     void Advance(float time_step, BWWheel* wheel);
 
+    // Set the BWParameters
     void SetBWParams(BWParameters* params_in);
 
+    // Destroy all allocated cuda memory
     void Destroy();  // safely free memory from GPU
 };

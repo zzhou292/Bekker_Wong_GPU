@@ -16,6 +16,7 @@ BWTerrain::BWTerrain(float x_in, float y_in, float resolution_in) {
 }
 
 void BWTerrain::Initialize() {
+    // Initialize terrain size and area information
     x_n_node = x / resolution + 1;
     y_n_node = y / resolution + 1;
     n_node = x_n_node * y_n_node;
@@ -39,7 +40,7 @@ void BWTerrain::Initialize() {
     terrain_params->n = 1.1;
     terrain_params->f_s = 0.0;
 
-    // malloc GPU memory
+    // malloc GPU memory for z array
     cudaMalloc((float**)&gpu_x_arr, n_node * sizeof(float));
     cudaMalloc((float**)&gpu_y_arr, n_node * sizeof(float));
     cudaMalloc((float**)&gpu_z_arr, n_node * sizeof(float));
@@ -51,30 +52,38 @@ void BWTerrain::Initialize() {
 }
 
 void BWTerrain::Destroy() {
+    // detroy all allocated GPU memory
     cudaFree(gpu_x_arr);
     cudaFree(gpu_y_arr);
     cudaFree(gpu_z_arr);
+    cudaFree(terrain_params);
 }
 
 void BWTerrain::Advance(float time_step, BWWheel* wheel) {
+    // calculate x boundary
     float x_min = wheel->pos_x - wheel->Get_R();
     float x_max = wheel->pos_x + wheel->Get_R();
 
+    // calculate y boundary
     float y_min = wheel->pos_y - wheel->Get_W() / 2.f;
     float y_max = wheel->pos_y + wheel->Get_W() / 2.f;
 
-    // find all vertices in the region of the cylinder
+    // find all vertices in the region of the cylinder - we call them active vertices
     std::vector<int> active_idx = Util_Find_Active(x_min, x_max, y_min, y_max);
 
+    // convert std::vector into int array for CUDA
     int* active_arr = active_idx.data();
     int size = active_idx.size();
 
+    // compute internal force
     BWTerrain::Util_Compute_Internal_Force(active_arr, size, wheel);
 
+    // copy updated z array back to CPU
     cudaMemcpy(z_arr, gpu_z_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 void BWTerrain::SetBWParams(BWParameters* params_in) {
+    // update all terrain parameters based on the BWParameters input
     terrain_params->Kphi = params_in->Kphi;
     terrain_params->Kc = params_in->Kc;
     terrain_params->n = params_in->n;
@@ -91,7 +100,7 @@ void BWTerrain::WriteOutput(std::string FileName) {
             std::cout << "....Successfully Created !" << std::endl;
     }
 
-    // Create and open a text file
+    // create and open an obj file
     std::ofstream OutOBJ("OUTPUT/" + FileName + ".obj");
 
     for (int i = 0; i < n_node; i++) {
@@ -99,6 +108,7 @@ void BWTerrain::WriteOutput(std::string FileName) {
                << " " << x_arr[i] << " " << y_arr[i] << " " << z_arr[i] << std::endl;
     }
 
+    // write out all vertices and faces information
     for (int j = 0; j < y_n_node - 1; j++) {
         for (int i = 0; i < x_n_node - 1; i++) {
             OutOBJ << "f"
@@ -110,11 +120,11 @@ void BWTerrain::WriteOutput(std::string FileName) {
         }
     }
 
-    // Close the file
+    // close the file
     OutOBJ.close();
 }
 
-// Utility Funtions:
+// CUDA kernel call to find active vertices
 __global__ void Ker_Find_Active(float* gpu_x_in,
                                 float* gpu_y_in,
                                 float x_min,
@@ -123,19 +133,28 @@ __global__ void Ker_Find_Active(float* gpu_x_in,
                                 float y_max,
                                 int size,
                                 bool* out_bool) {
+    // find the id for the current thread
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    // if out of range, quick rejection
     if (idx >= size)
         return;
+
+    // if inside interest region, update out_bool arr
     if (gpu_x_in[idx] >= x_min && gpu_x_in[idx] <= x_max && gpu_y_in[idx] >= y_min && gpu_y_in[idx] <= y_max)
         out_bool[idx] = true;
+
+    // waiting for all threads to finish
     __syncthreads();
 }
 
-// Note: This util function assumes that the out_idx array is a float array uninitialized
+// Wrapper for CUDA kernal call to find all active vertices
 std::vector<int> BWTerrain::Util_Find_Active(float x_min, float x_max, float y_min, float y_max) {
+    // default block size set to 1024
     int block_size = 1024;
-    int n_block = n_node / 1024 + 1;
+    int n_block = n_node / block_size + 1;
 
+    // create and copy an output boolean array into GPU memory
     bool* out_bool = new bool[n_node];
     for (int i = 0; i < n_node; i++) {
         out_bool[i] = false;
@@ -144,24 +163,27 @@ std::vector<int> BWTerrain::Util_Find_Active(float x_min, float x_max, float y_m
     cudaMalloc((bool**)&gpu_out_bool, n_node * sizeof(bool));
     cudaMemcpy(gpu_out_bool, out_bool, n_node * sizeof(bool), cudaMemcpyHostToDevice);
 
+    // call CUDA kernel
     Ker_Find_Active<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, x_min, x_max, y_min, y_max, n_node, gpu_out_bool);
 
+    // copy data back to cpu array
     cudaMemcpy(out_bool, gpu_out_bool, n_node * sizeof(bool), cudaMemcpyDeviceToHost);
 
+    // store all active vertices in a std::vector
     std::vector<int> idx_vec;
-
     for (int i = 0; i < n_node; i++) {
         if (out_bool[i] == true) {
             idx_vec.push_back(i);
         }
     }
 
+    // free temporary GPU memory
     cudaFree(gpu_out_bool);
 
     return idx_vec;
 }
 
-// Utility Funtions:
+// CUDA kernel call to compute force based on Bekker-Wong Pressure-Sinkage Formulation
 __global__ void Ker_Compute_Force(float* gpu_x_in,
                                   float* gpu_y_in,
                                   float* gpu_z_in,
@@ -175,26 +197,30 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
                                   float b,
                                   float* gpu_out_force,
                                   BWParameters* params_in) {
+    // calculate the idx for the current thread
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    // if out of range, return
     if (idx >= idx_size)
         return;
 
-    // Current vertex z direction ray-casting
+    // current vertex z direction ray-casting
     float a = fabsf(gpu_x_in[active_idx[idx]]) - pos_x;
     float absz = sqrtf(powf(r, 2) - powf(a, 2));
+    // ray-casting: the lowest z direction on the cylinderical wheel
     float wheel_z = pos_z - absz;
     float delta_z = gpu_z_in[active_idx[idx]] - wheel_z;
-    // generate a fictitious force
+    // generate force based on BW formula
     if (delta_z > 0) {
         float p_pressure = (params_in->Kc / b + params_in->Kphi) * powf(delta_z, params_in->n);
         gpu_out_force[active_idx[idx]] = p_pressure * area;
         gpu_z_in[active_idx[idx]] = wheel_z;
     }
 
+    // waiting for all threads to finish
     __syncthreads();
 }
 
-// Utility function for z-direction ray casting and internal force computation
+// Wrapper for CUDA kernal call to compute force based on Bekker-Wong Formulation
 void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWheel* wheel) {
     float* out_force = new float[n_node];
     int* gpu_idx_arr;
@@ -215,6 +241,7 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
 
     float b = resolution * resolution / (resolution * 4);
 
+    // call CUDA kernal
     Ker_Compute_Force<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, gpu_z_arr, gpu_idx_arr, idx_arr_size, wheel->pos_x,
                                                wheel->pos_y, wheel->pos_z, wheel->Get_R(), area, b, gpu_out_force,
                                                terrain_params);
