@@ -16,6 +16,8 @@ class BWTerrain {
     float* gpu_y_arr;  // gpu pos y arr
     float* gpu_z_arr;  // gpu pos z arr
 
+    float area;
+
     int n_node;
     int x_n_node;
     int y_n_node;

@@ -18,6 +18,7 @@ void BWTerrain::Initialize() {
     x_n_node = x / resolution + 1;
     y_n_node = y / resolution + 1;
     n_node = x_n_node * y_n_node;
+    area = resolution * resolution;
 
     x_arr = new float[n_node];
     y_arr = new float[n_node];
@@ -56,10 +57,9 @@ void BWTerrain::Advance(float time_step, BWWheel* wheel) {
     // find all vertices in the region of the cylinder
     std::vector<int> active_idx = Util_Find_Active(x_min, x_max, y_min, y_max);
 
-    std::cout << "num_active: " << active_idx.size() << std::endl;
     int* active_arr = active_idx.data();
     int size = active_idx.size();
-    // std::cout << "active:" << size << stUtil_Find_Activendl;
+
     BWTerrain::Util_Compute_Internal_Force(active_arr, size, wheel);
 
     cudaMemcpy(x_arr, gpu_x_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
@@ -110,7 +110,7 @@ __global__ void Ker_Find_Active(float* gpu_x_in,
                                 int size,
                                 bool* out_bool) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx > size)
+    if (idx >= size)
         return;
     if (gpu_x_in[idx] >= x_min && gpu_x_in[idx] <= x_max && gpu_y_in[idx] >= y_min && gpu_y_in[idx] <= y_max)
         out_bool[idx] = true;
@@ -157,22 +157,22 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
                                   float pos_y,
                                   float pos_z,
                                   float r,
+                                  float area,
                                   float* gpu_out_force) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx > idx_size)
+    if (idx >= idx_size)
         return;
 
     // Current vertex z direction ray-casting
-    float a = abs(gpu_x_in[active_idx[idx]]) - pos_x;
-    float c = sqrt(pow(a, 2) + pow(r, 2));
-    float wheel_z = r * (c - r) / c;
+    float a = fabsf(gpu_x_in[active_idx[idx]]) - pos_x;
+    float absz = sqrtf(powf(r, 2) - powf(a, 2));
+    float wheel_z = pos_z - absz;
     float delta_z = gpu_z_in[active_idx[idx]] - wheel_z;
-
-    gpu_z_in[active_idx[idx]] = wheel_z;
-
     // generate a fictitious force
-    if (delta_z > 0)
-        gpu_out_force[active_idx[idx]] = delta_z * 1000.f;
+    if (delta_z > 0) {
+        gpu_out_force[active_idx[idx]] = delta_z * area * 100000.f;
+        gpu_z_in[active_idx[idx]] = wheel_z;
+    }
 
     __syncthreads();
 }
@@ -180,6 +180,7 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
 // Utility function for z-direction ray casting and internal force computation
 void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWheel* wheel) {
     float* out_force = new float[n_node];
+    int* gpu_idx_arr;
     float* gpu_out_force;
 
     int block_size = 1024;
@@ -190,11 +191,13 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
     }
 
     cudaMalloc((float**)&gpu_out_force, n_node * sizeof(float));
+    cudaMalloc((int**)&gpu_idx_arr, idx_arr_size * sizeof(int));
 
     cudaMemcpy(gpu_out_force, out_force, n_node * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpu_idx_arr, idx_arr, idx_arr_size * sizeof(int), cudaMemcpyHostToDevice);
 
-    Ker_Compute_Force<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, gpu_z_arr, idx_arr, idx_arr_size, wheel->pos_x,
-                                               wheel->pos_y, wheel->pos_z, wheel->Get_R(), gpu_out_force);
+    Ker_Compute_Force<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, gpu_z_arr, gpu_idx_arr, idx_arr_size, wheel->pos_x,
+                                               wheel->pos_y, wheel->pos_z, wheel->Get_R(), area, gpu_out_force);
 
     cudaMemcpy(out_force, gpu_out_force, n_node * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -202,8 +205,9 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
     for (int i = 0; i < n_node; i++) {
         sum_force += out_force[i];
     }
-    std::cout << "sum_force:" << sum_force << std::endl;
+
     wheel->acc_z = sum_force / wheel->Get_M() - 9.8f;
 
     cudaFree(gpu_out_force);
+    cudaFree(gpu_idx_arr);
 }
