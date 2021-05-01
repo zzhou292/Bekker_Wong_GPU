@@ -1,4 +1,5 @@
 #include <cuda_device_runtime_api.h>
+#include <cuda_runtime.h>
 #include <driver_types.h>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,14 @@ void BWTerrain::Initialize() {
         y_arr[i] = (int)(i / x_n_node) * resolution;
         z_arr[i] = 0.f;
     }
+
+    // initialize unified memory for Bekker soil parameter structure
+    // set all parameters to default values
+    cudaMallocManaged(&terrain_params, sizeof(BWParameters));
+    terrain_params->Kphi = 0.2e6;
+    terrain_params->Kc = 0;
+    terrain_params->n = 1.1;
+    terrain_params->f_s = 0.0;
 
     // malloc GPU memory
     cudaMalloc((float**)&gpu_x_arr, n_node * sizeof(float));
@@ -62,9 +71,14 @@ void BWTerrain::Advance(float time_step, BWWheel* wheel) {
 
     BWTerrain::Util_Compute_Internal_Force(active_arr, size, wheel);
 
-    cudaMemcpy(x_arr, gpu_x_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(y_arr, gpu_y_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(z_arr, gpu_z_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
+}
+
+void BWTerrain::SetBWParams(BWParameters* params_in) {
+    terrain_params->Kphi = params_in->Kphi;
+    terrain_params->Kc = params_in->Kc;
+    terrain_params->n = params_in->n;
+    terrain_params->f_s = params_in->f_s;
 }
 
 void BWTerrain::WriteOutput(std::string FileName) {
@@ -158,7 +172,9 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
                                   float pos_z,
                                   float r,
                                   float area,
-                                  float* gpu_out_force) {
+                                  float b,
+                                  float* gpu_out_force,
+                                  BWParameters* params_in) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx >= idx_size)
         return;
@@ -170,7 +186,8 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
     float delta_z = gpu_z_in[active_idx[idx]] - wheel_z;
     // generate a fictitious force
     if (delta_z > 0) {
-        gpu_out_force[active_idx[idx]] = delta_z * area * 100000.f;
+        float p_pressure = (params_in->Kc / b + params_in->Kphi) * powf(delta_z, params_in->n);
+        gpu_out_force[active_idx[idx]] = p_pressure * area;
         gpu_z_in[active_idx[idx]] = wheel_z;
     }
 
@@ -196,8 +213,11 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
     cudaMemcpy(gpu_out_force, out_force, n_node * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(gpu_idx_arr, idx_arr, idx_arr_size * sizeof(int), cudaMemcpyHostToDevice);
 
+    float b = resolution * resolution / (resolution * 4);
+
     Ker_Compute_Force<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, gpu_z_arr, gpu_idx_arr, idx_arr_size, wheel->pos_x,
-                                               wheel->pos_y, wheel->pos_z, wheel->Get_R(), area, gpu_out_force);
+                                               wheel->pos_y, wheel->pos_z, wheel->Get_R(), area, b, gpu_out_force,
+                                               terrain_params);
 
     cudaMemcpy(out_force, gpu_out_force, n_node * sizeof(float), cudaMemcpyDeviceToHost);
 
