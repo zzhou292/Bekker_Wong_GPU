@@ -1,8 +1,9 @@
 #include "BWWheel.cuh"
 
-BWWheel::BWWheel(float r_in, float w_in) {
+BWWheel::BWWheel(float r_in, float w_in, float m_in) {
     r = r_in;
     w = w_in;
+    m = m_in;
 }
 
 void BWWheel::Initialize(float pos_x_in, float pos_y_in, float pos_z_in) {
@@ -24,7 +25,7 @@ void BWWheel::Advance(float time_step) {
     vel_y = vel_y + acc_y * time_step;
     vel_z = vel_z + acc_z * time_step;
 
-    pos_x = vel_x * time_step;
-    pos_y = vel_y * time_step;
-    pos_z = pos_z * time_step;
+    pos_x = pos_x + vel_x * time_step;
+    pos_y = pos_y + vel_y * time_step;
+    pos_z = pos_z + vel_z * time_step;
 }

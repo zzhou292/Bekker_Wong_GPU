@@ -1,9 +1,11 @@
 #include <cuda_device_runtime_api.h>
+#include <driver_types.h>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <boost/filesystem.hpp>
 #include <vector>
+#include <cmath>
 #include "BWTerrain.cuh"
 
 BWTerrain::BWTerrain(float x_in, float y_in, float resolution_in) {
@@ -52,9 +54,17 @@ void BWTerrain::Advance(float time_step, BWWheel* wheel) {
     float y_max = wheel->pos_y + wheel->Get_W() / 2.f;
 
     // find all vertices in the region of the cylinder
-    std::vector<int> active_idx = Util_Find_Active(gpu_x_arr, gpu_y_arr, x_min, x_max, y_min, y_max, n_node);
+    std::vector<int> active_idx = Util_Find_Active(x_min, x_max, y_min, y_max);
 
     std::cout << "num_active: " << active_idx.size() << std::endl;
+    int* active_arr = active_idx.data();
+    int size = active_idx.size();
+    // std::cout << "active:" << size << stUtil_Find_Activendl;
+    BWTerrain::Util_Compute_Internal_Force(active_arr, size, wheel);
+
+    cudaMemcpy(x_arr, gpu_x_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_arr, gpu_y_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(z_arr, gpu_z_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 void BWTerrain::WriteOutput(std::string FileName) {
@@ -91,7 +101,6 @@ void BWTerrain::WriteOutput(std::string FileName) {
 }
 
 // Utility Funtions:
-
 __global__ void Ker_Find_Active(float* gpu_x_in,
                                 float* gpu_y_in,
                                 float x_min,
@@ -109,31 +118,25 @@ __global__ void Ker_Find_Active(float* gpu_x_in,
 }
 
 // Note: This util function assumes that the out_idx array is a float array uninitialized
-std::vector<int> BWTerrain::Util_Find_Active(float* gpu_x_in,
-                                             float* gpu_y_in,
-                                             float x_min,
-                                             float x_max,
-                                             float y_min,
-                                             float y_max,
-                                             int size) {
+std::vector<int> BWTerrain::Util_Find_Active(float x_min, float x_max, float y_min, float y_max) {
     int block_size = 1024;
-    int n_block = size / 1024 + 1;
+    int n_block = n_node / 1024 + 1;
 
-    bool* out_bool = new bool[size];
-    for (int i = 0; i < size; i++) {
+    bool* out_bool = new bool[n_node];
+    for (int i = 0; i < n_node; i++) {
         out_bool[i] = false;
     }
     bool* gpu_out_bool;
-    cudaMalloc((bool**)&gpu_out_bool, size * sizeof(bool));
-    cudaMemcpy(gpu_out_bool, out_bool, size * sizeof(bool), cudaMemcpyHostToDevice);
+    cudaMalloc((bool**)&gpu_out_bool, n_node * sizeof(bool));
+    cudaMemcpy(gpu_out_bool, out_bool, n_node * sizeof(bool), cudaMemcpyHostToDevice);
 
-    Ker_Find_Active<<<n_block, block_size>>>(gpu_x_in, gpu_y_in, x_min, x_max, y_min, y_max, size, gpu_out_bool);
+    Ker_Find_Active<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, x_min, x_max, y_min, y_max, n_node, gpu_out_bool);
 
-    cudaMemcpy(out_bool, gpu_out_bool, size * sizeof(bool), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_bool, gpu_out_bool, n_node * sizeof(bool), cudaMemcpyDeviceToHost);
 
     std::vector<int> idx_vec;
 
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < n_node; i++) {
         if (out_bool[i] == true) {
             idx_vec.push_back(i);
         }
@@ -142,4 +145,65 @@ std::vector<int> BWTerrain::Util_Find_Active(float* gpu_x_in,
     cudaFree(gpu_out_bool);
 
     return idx_vec;
+}
+
+// Utility Funtions:
+__global__ void Ker_Compute_Force(float* gpu_x_in,
+                                  float* gpu_y_in,
+                                  float* gpu_z_in,
+                                  int* active_idx,
+                                  int idx_size,
+                                  float pos_x,
+                                  float pos_y,
+                                  float pos_z,
+                                  float r,
+                                  float* gpu_out_force) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx > idx_size)
+        return;
+
+    // Current vertex z direction ray-casting
+    float a = abs(gpu_x_in[active_idx[idx]]) - pos_x;
+    float c = sqrt(pow(a, 2) + pow(r, 2));
+    float wheel_z = r * (c - r) / c;
+    float delta_z = gpu_z_in[active_idx[idx]] - wheel_z;
+
+    gpu_z_in[active_idx[idx]] = wheel_z;
+
+    // generate a fictitious force
+    if (delta_z > 0)
+        gpu_out_force[active_idx[idx]] = delta_z * 1000.f;
+
+    __syncthreads();
+}
+
+// Utility function for z-direction ray casting and internal force computation
+void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWheel* wheel) {
+    float* out_force = new float[n_node];
+    float* gpu_out_force;
+
+    int block_size = 1024;
+    int n_block = idx_arr_size / 1024 + 1;
+
+    for (int i = 0; i < n_node; i++) {
+        out_force[i] = 0.f;
+    }
+
+    cudaMalloc((float**)&gpu_out_force, n_node * sizeof(float));
+
+    cudaMemcpy(gpu_out_force, out_force, n_node * sizeof(float), cudaMemcpyHostToDevice);
+
+    Ker_Compute_Force<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, gpu_z_arr, idx_arr, idx_arr_size, wheel->pos_x,
+                                               wheel->pos_y, wheel->pos_z, wheel->Get_R(), gpu_out_force);
+
+    cudaMemcpy(out_force, gpu_out_force, n_node * sizeof(float), cudaMemcpyDeviceToHost);
+
+    float sum_force = 0.f;
+    for (int i = 0; i < n_node; i++) {
+        sum_force += out_force[i];
+    }
+    std::cout << "sum_force:" << sum_force << std::endl;
+    wheel->acc_z = sum_force / wheel->Get_M() - 9.8f;
+
+    cudaFree(gpu_out_force);
 }

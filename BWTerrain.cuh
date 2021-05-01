@@ -21,8 +21,8 @@ class BWTerrain {
     int y_n_node;
 
     // private utility functions
-    std::vector<int>
-    Util_Find_Active(float* gpu_x_in, float* gpu_y_in, float x_min, float x_max, float y_min, float y_max, int size);
+    std::vector<int> Util_Find_Active(float x_min, float x_max, float y_min, float y_max);
+    void Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWheel* wheel);
 
   public:
     BWTerrain(float x_in, float y_in, float resolution_in);
