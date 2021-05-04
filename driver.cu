@@ -6,7 +6,7 @@
 #include "BWTerrain.cuh"
 
 int main(int argc, char* argv[]) {
-    BWTerrain terrain = BWTerrain(5.f, 5.f, 0.05f);
+    BWTerrain terrain = BWTerrain(5.f, 5.f, 0.02f);
     BWWheel wheel = BWWheel(0.5f, 1.f, 10.f);
     wheel.Initialize(1.0f, 2.5f, 0.5f);
     wheel.acc_z = -9.8;

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <algorithm>
 #include <boost/filesystem.hpp>
 #include <vector>
 #include <cmath>
@@ -74,9 +75,19 @@ void BWTerrain::Advance(float time_step, BWWheel* wheel) {
     // convert std::vector into int array for CUDA
     int* active_arr = active_idx.data();
     int size = active_idx.size();
+    if (enable_bulldozing)
+        displacement_arr = new float[size];
 
     // compute internal force
-    BWTerrain::Util_Compute_Internal_Force(active_arr, size, wheel);
+    BWTerrain::Util_Compute_Internal_Force(active_arr, size, wheel, displacement_arr);
+
+    // copy updated z array back to CPU
+    cudaMemcpy(z_arr, gpu_z_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // compute bulldozing force
+    if (enable_bulldozing) {
+        BWTerrain::Util_Compute_Bulldozing(active_arr, displacement_arr, size);
+    }
 
     // copy updated z array back to CPU
     cudaMemcpy(z_arr, gpu_z_arr, n_node * sizeof(float), cudaMemcpyDeviceToHost);
@@ -188,6 +199,7 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
                                   float* gpu_y_in,
                                   float* gpu_z_in,
                                   int* active_idx,
+                                  float* gpu_displacement_arr,
                                   int idx_size,
                                   float pos_x,
                                   float pos_y,
@@ -196,7 +208,8 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
                                   float area,
                                   float b,
                                   float* gpu_out_force,
-                                  BWParameters* params_in) {
+                                  BWParameters* params_in,
+                                  bool bulldozing) {
     // calculate the idx for the current thread
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     // if out of range, return
@@ -214,6 +227,8 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
         float p_pressure = (params_in->Kc / b + params_in->Kphi) * powf(delta_z, params_in->n);
         gpu_out_force[active_idx[idx]] = p_pressure * area;
         gpu_z_in[active_idx[idx]] = wheel_z;
+        if (bulldozing)
+            gpu_displacement_arr[idx] = delta_z;
     }
 
     // waiting for all threads to finish
@@ -221,10 +236,12 @@ __global__ void Ker_Compute_Force(float* gpu_x_in,
 }
 
 // Wrapper for CUDA kernal call to compute force based on Bekker-Wong Formulation
-void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWheel* wheel) {
+void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWheel* wheel, float* displacement_arr) {
     float* out_force = new float[n_node];
     int* gpu_idx_arr;
     float* gpu_out_force;
+
+    float* gpu_displacement_arr;
 
     int block_size = 1024;
     int n_block = idx_arr_size / 1024 + 1;
@@ -235,6 +252,8 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
 
     cudaMalloc((float**)&gpu_out_force, n_node * sizeof(float));
     cudaMalloc((int**)&gpu_idx_arr, idx_arr_size * sizeof(int));
+    if (enable_bulldozing)
+        cudaMalloc((float**)&gpu_displacement_arr, idx_arr_size * sizeof(float));
 
     cudaMemcpy(gpu_out_force, out_force, n_node * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(gpu_idx_arr, idx_arr, idx_arr_size * sizeof(int), cudaMemcpyHostToDevice);
@@ -242,11 +261,13 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
     float b = resolution * resolution / (resolution * 4);
 
     // call CUDA kernal
-    Ker_Compute_Force<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, gpu_z_arr, gpu_idx_arr, idx_arr_size, wheel->pos_x,
-                                               wheel->pos_y, wheel->pos_z, wheel->Get_R(), area, b, gpu_out_force,
-                                               terrain_params);
+    Ker_Compute_Force<<<n_block, block_size>>>(gpu_x_arr, gpu_y_arr, gpu_z_arr, gpu_idx_arr, gpu_displacement_arr,
+                                               idx_arr_size, wheel->pos_x, wheel->pos_y, wheel->pos_z, wheel->Get_R(),
+                                               area, b, gpu_out_force, terrain_params, enable_bulldozing);
 
     cudaMemcpy(out_force, gpu_out_force, n_node * sizeof(float), cudaMemcpyDeviceToHost);
+    if (enable_bulldozing)
+        cudaMemcpy(displacement_arr, gpu_displacement_arr, idx_arr_size * sizeof(float), cudaMemcpyDeviceToHost);
 
     float sum_force = 0.f;
     for (int i = 0; i < n_node; i++) {
@@ -257,4 +278,121 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
 
     cudaFree(gpu_out_force);
     cudaFree(gpu_idx_arr);
+}
+
+// CUDA kernel call to compute force based on Bekker-Wong Pressure-Sinkage Formulation
+__global__ void Ker_Get_Bz_Neighbours(int* idx_in, int* idx_out, int size, int x_node_num, int y_node_num) {
+    // calculate the idx for the current thread
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    // if out of range, return
+    if (idx >= size)
+        return;
+
+    int y_idx = idx_in[idx] / x_node_num;
+    int x_idx = idx_in[idx] % x_node_num;
+
+    int x_idx_1 = x_idx + 1;
+    int x_idx_2 = x_idx - 1;
+    int y_idx_1 = y_idx + 1;
+    int y_idx_2 = y_idx - 1;
+
+    if (x_idx_1 >= x_node_num) {
+        idx_out[4 * idx] = -1;
+    } else {
+        idx_out[4 * idx] = y_idx * x_node_num + x_idx_1;
+    }
+
+    if (x_idx_2 < 0) {
+        idx_out[4 * idx + 1] = -1;
+    } else {
+        idx_out[4 * idx + 1] = y_idx * x_node_num + x_idx_2;
+    }
+
+    if (y_idx_1 >= y_node_num) {
+        idx_out[4 * idx + 2] = -1;
+    } else {
+        idx_out[4 * idx + 2] = y_idx_1 * x_node_num + x_idx;
+    }
+
+    if (y_idx_1 < 0) {
+        idx_out[4 * idx + 3] = -1;
+    } else {
+        idx_out[4 * idx + 3] = y_idx_2 * x_node_num + x_idx;
+    }
+}
+
+__global__ void Ker_Bz_Raise_Neighbour(int* idx_in, int size, float* gpu_z_arr) {
+    // calculate the idx for the current thread
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    // if out of range, return
+    if (idx >= size)
+        return;
+
+    gpu_z_arr[idx_in[idx]] += 0.0005;
+}
+
+void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int active_size) {
+    float tot_displacement = 0.f;
+    std::vector<int> hit_vertices;
+    for (int i = 0; i < active_size; i++) {
+        if (displacement_in[i] > 0) {
+            hit_vertices.push_back(i);
+            tot_displacement += displacement_in[i];
+        }
+    }
+
+    int hit_size = hit_vertices.size();
+
+    if (hit_size == 0) {
+        return;
+    }
+    std::cout << "hit_size" << hit_size << std::endl;
+
+    int* hit_arr = hit_vertices.data();
+
+    int* gpu_idx_in;   // input index array, including all active vertices from the last loop
+    int* gpu_idx_out;  // output index array containing the neighbour of all 'active_size' vertices
+    int* neighbour_idx = new int[4 * hit_size];
+
+    cudaMalloc((int**)&gpu_idx_in, hit_size * sizeof(int));
+    cudaMalloc((int**)&gpu_idx_out, 4 * hit_size * sizeof(int));
+
+    cudaMemcpy(gpu_idx_in, hit_arr, sizeof(int), cudaMemcpyDeviceToHost);
+
+    int block_size = 256;
+    int n_block = hit_size / 256 + 1;
+
+    Ker_Get_Bz_Neighbours<<<n_block, block_size>>>(gpu_idx_in, gpu_idx_out, hit_size, x_n_node, y_n_node);
+
+    cudaMemcpy(neighbour_idx, gpu_idx_out, 4 * hit_size * sizeof(int), cudaMemcpyDeviceToHost);
+
+    std::vector<int> raw_neighbour;
+    for (int i = 0; i < 4 * hit_size; i++) {
+        raw_neighbour.push_back(neighbour_idx[i]);
+    }
+
+    std::sort(raw_neighbour.begin(), raw_neighbour.end());
+
+    auto iter = std::unique(raw_neighbour.begin(), raw_neighbour.end());
+
+    raw_neighbour.erase(iter, raw_neighbour.end());
+
+    if (raw_neighbour[0] == -1) {
+        raw_neighbour.erase(raw_neighbour.begin());
+    }
+
+    cudaFree(gpu_idx_in);
+    cudaFree(gpu_idx_out);
+
+    int neigh_size = raw_neighbour.size();
+    int* neigh_arr = raw_neighbour.data();
+    int* gpu_neigh_arr;
+
+    cudaMalloc((int**)&gpu_neigh_arr, neigh_size * sizeof(int));
+    cudaMemcpy(gpu_neigh_arr, neigh_arr, neigh_size * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Raise Neighourbing Nodes
+    Ker_Bz_Raise_Neighbour<<<n_block, block_size>>>(gpu_neigh_arr, neigh_size, gpu_z_arr);
+
+    cudaFree(gpu_neigh_arr);
 }
