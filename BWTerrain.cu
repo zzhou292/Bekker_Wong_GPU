@@ -16,6 +16,9 @@ BWTerrain::BWTerrain(float x_in, float y_in, float resolution_in) {
     resolution = resolution_in;
 }
 
+// Initialize the terrain
+// This function needs to be called before simulation
+// As it declares and initializes necessary information on both CPU and GPU
 void BWTerrain::Initialize() {
     // Initialize terrain size and area information
     x_n_node = x / resolution + 1;
@@ -53,6 +56,8 @@ void BWTerrain::Initialize() {
     cudaMemcpy(gpu_z_arr, z_arr, n_node * sizeof(float), cudaMemcpyHostToDevice);
 }
 
+// Safely free up all GPU memory
+// This function needs to be called after the simulation finishes
 void BWTerrain::Destroy() {
     // detroy all allocated GPU memory
     cudaFree(gpu_x_arr);
@@ -61,6 +66,8 @@ void BWTerrain::Destroy() {
     cudaFree(terrain_params);
 }
 
+// Advance the terrain simulation with a time_step
+// This function requires pointer to the wheel instance
 void BWTerrain::Advance(float time_step, BWWheel* wheel) {
     // calculate x boundary
     float x_min = wheel->pos_x - wheel->Get_R();
@@ -103,6 +110,7 @@ void BWTerrain::SetBWParams(BWParameters* params_in) {
     terrain_params->bz_ratio = params_in->bz_ratio;
 }
 
+// Utility function to write out mesh representaion of the BWTerrain
 void BWTerrain::WriteOutput(std::string FileName) {
     boost::filesystem::path dir("OUTPUT");
 
@@ -196,7 +204,25 @@ std::vector<int> BWTerrain::Util_Find_Active(float x_min, float x_max, float y_m
     return idx_vec;
 }
 
-// CUDA kernel call to compute force based on Bekker-Wong Pressure-Sinkage Formulation
+/**
+ * @brief Bekker-Wong Kernel - This kernel computes the pressure on each contact patch based on Bekker-Wong
+ *                              Formulation
+ * @param gpu_x_in  pointer to x pos array on GPU
+ * @param gpu_y_in  pointer to y pos array on GPU
+ * @param gpu_z_in  pointer to z pos array on GPU
+ * @param active_idx all actve idx extracted from the Z-direction Ray Casting Kernel
+ * @param gpu_displacement_arr  array to store all displacement, Located on GPU
+ * @param idx_size  size of idx array of all active vertices, Located on GPU
+ * @param pos_x     pos x of the cylinderical wheel
+ * @param pos_y     pos y of the cylinderical wheel
+ * @param pos_z     pos z of the cylinderical wheel
+ * @param r         radius of the cylinderical wheel
+ * @param area      contact patch area
+ * @param b         constant b in Bekker-Wong formula
+ * @param gpu_out_force output force array, located on GPU
+ * @param params_in soil parameter input
+ * @param bulldozing    bulldozing boolean indicator
+ */
 __global__ void Ker_Compute_Force(float* gpu_x_in,
                                   float* gpu_y_in,
                                   float* gpu_z_in,
@@ -284,6 +310,20 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
         cudaFree(gpu_displacement_arr);
 }
 
+// Note: During experiment, this kernel function needs rethinking
+// It's belived that both correctness and efficiency are problematic
+// Correctness Issue: Noticed that when the mesh resolution goes down to 0.02, results are not good
+// Efficiency Issue: CUDA thread divergence
+/**
+ * @brief Bulldozing Kernel - This function takes in all hit vertices and returns all their neighbours
+ *        Each vertex has 4 neighbours
+ *
+ * @param idx_in hit vertices input, size is idx_out
+ * @param idx_out neighbour vertices output, size is 4 * idx_out
+ * @param size size of the hit vertices input
+ * @param x_node_num  number of nodes on x side
+ * @param y_node_num  number of nodes on y side
+ */
 __global__ void Ker_Get_Bz_Neighbours(int* idx_in, int* idx_out, int size, int x_node_num, int y_node_num) {
     // calculate the idx for the current thread
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -330,6 +370,16 @@ __global__ void Ker_Get_Bz_Neighbours(int* idx_in, int* idx_out, int size, int x
     __syncthreads();
 }
 
+/**
+ * @brief Bulldozing Kernel - kernel function to raise the vertices
+ *
+ * @param idx_in            neighbour vertices input
+ * @param size              size of the neighbour vertices input
+ * @param gpu_z_arr         z_pos input array, variable in BWTerrain class
+ * @param avg_soil_raise    average soil raise distance
+ * @param bz_ratio          bulldozing ratio
+ * @return __global__
+ */
 __global__ void Ker_Bz_Raise_Neighbour(int* idx_in, int size, float* gpu_z_arr, float avg_soil_raise, float bz_ratio) {
     // calculate the idx for the current thread
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -337,10 +387,21 @@ __global__ void Ker_Bz_Raise_Neighbour(int* idx_in, int size, float* gpu_z_arr, 
     if (idx >= size)
         return;
 
+    // raise the soil neighbouring vertices
     gpu_z_arr[idx_in[idx]] += bz_ratio * avg_soil_raise;
 }
 
+/**
+ * @brief Bulldozing Helper - Helper function to perform bulldozing effect
+ *        Typically, this function should be followed up with erosion process
+ *
+ * @param idx_in    active vertices idx input
+ * @param displacement_in   displacement input
+ * @param active_size   size of both active vertices and displacement input
+ */
 void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int active_size) {
+    // calculate total displacement for bulldozing average displacement computation
+    // also extract all hit vertices (active vertices whose displacement is larger than 0)
     float tot_displacement = 0.f;
     std::vector<int> hit_vertices;
     for (int i = 0; i < active_size; i++) {
@@ -358,33 +419,40 @@ void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int
 
     int* hit_arr = hit_vertices.data();
 
+    // declare GPU variables
     int* gpu_idx_in;   // input index array, including all hit vertices from the last loop
     int* gpu_idx_out;  // output index array containing the neighbour of all 'hit_size' vertices
+    // declare CPU neighbouring idx array
+    // Note: each vertex has 4 neighbours, this array should record neighbouring vertices of all of them
+    // size is set to be 4*hit_size
     int* neighbour_idx = new int[4 * hit_size];
 
+    // allocate GPU memory
     cudaMalloc((int**)&gpu_idx_in, hit_size * sizeof(int));
     cudaMalloc((int**)&gpu_idx_out, 4 * hit_size * sizeof(int));
 
+    // transfer data to GPU
     cudaMemcpy(gpu_idx_in, hit_arr, hit_size * sizeof(int), cudaMemcpyHostToDevice);
 
+    // call kernel to find all active neighbours
     int block_size = 1024;
     int n_block = hit_size / 1024 + 1;
-
     Ker_Get_Bz_Neighbours<<<n_block, block_size>>>(gpu_idx_in, gpu_idx_out, hit_size, x_n_node, y_n_node);
 
+    // copy neighbour results back to CPU
     cudaMemcpy(neighbour_idx, gpu_idx_out, 4 * hit_size * sizeof(int), cudaMemcpyDeviceToHost);
 
+    // filtering out all repeated array
     std::vector<int> raw_neighbour;
     for (int i = 0; i < 4 * hit_size; i++) {
         raw_neighbour.push_back(neighbour_idx[i]);
     }
-
     std::sort(raw_neighbour.begin(), raw_neighbour.end());
-
     std::vector<int>::iterator ip;
     ip = std::unique(raw_neighbour.begin(), raw_neighbour.begin() + raw_neighbour.size());
     raw_neighbour.resize(std::distance(raw_neighbour.begin(), ip));
 
+    // take out all invalid neighbours
     if (raw_neighbour[0] == -1) {
         raw_neighbour.erase(raw_neighbour.begin() + 0);
     }
@@ -392,11 +460,10 @@ void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int
     cudaFree(gpu_idx_in);
     cudaFree(gpu_idx_out);
 
+    // start soil raise process
     int neigh_size = raw_neighbour.size();
     int* neigh_arr = raw_neighbour.data();
-
     int* gpu_neigh_arr;
-
     cudaMalloc((int**)&gpu_neigh_arr, neigh_size * sizeof(int));
     cudaMemcpy(gpu_neigh_arr, neigh_arr, neigh_size * sizeof(int), cudaMemcpyHostToDevice);
 
