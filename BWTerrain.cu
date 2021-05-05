@@ -40,6 +40,7 @@ void BWTerrain::Initialize() {
     terrain_params->Kc = 0;
     terrain_params->n = 1.1;
     terrain_params->f_s = 0.0;
+    terrain_params->bz_ratio = 0.2;
 
     // malloc GPU memory for z array
     cudaMalloc((float**)&gpu_x_arr, n_node * sizeof(float));
@@ -99,6 +100,7 @@ void BWTerrain::SetBWParams(BWParameters* params_in) {
     terrain_params->Kc = params_in->Kc;
     terrain_params->n = params_in->n;
     terrain_params->f_s = params_in->f_s;
+    terrain_params->bz_ratio = params_in->bz_ratio;
 }
 
 void BWTerrain::WriteOutput(std::string FileName) {
@@ -278,6 +280,8 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
 
     cudaFree(gpu_out_force);
     cudaFree(gpu_idx_arr);
+    if (enable_bulldozing)
+        cudaFree(gpu_displacement_arr);
 }
 
 __global__ void Ker_Get_Bz_Neighbours(int* idx_in, int* idx_out, int size, int x_node_num, int y_node_num) {
@@ -287,7 +291,7 @@ __global__ void Ker_Get_Bz_Neighbours(int* idx_in, int* idx_out, int size, int x
     if (idx >= size)
         return;
 
-    int y_idx = idx_in[idx] / x_node_num;
+    int y_idx = (int)idx_in[idx] / x_node_num;
     int x_idx = idx_in[idx] % x_node_num;
 
     int x_idx_1 = x_idx + 1;
@@ -298,40 +302,42 @@ __global__ void Ker_Get_Bz_Neighbours(int* idx_in, int* idx_out, int size, int x
     if (x_idx_1 >= x_node_num) {
         idx_out[4 * idx] = -1;
     } else {
-        idx_out[4 * idx] = y_idx * x_node_num + x_idx_1;
+        // idx_out[4 * idx] = y_idx * x_node_num + x_idx_1;
+        idx_out[4 * idx] = idx_in[idx] + 1;
     }
-    __syncthreads();
 
     if (x_idx_2 < 0) {
         idx_out[4 * idx + 1] = -1;
     } else {
-        idx_out[4 * idx + 1] = y_idx * x_node_num + x_idx_2;
+        // idx_out[4 * idx + 1] = y_idx * x_node_num + x_idx_2;
+        idx_out[4 * idx + 1] = idx_in[idx] - 1;
     }
-    __syncthreads();
+
     if (y_idx_1 >= y_node_num) {
         idx_out[4 * idx + 2] = -1;
     } else {
-        idx_out[4 * idx + 2] = y_idx_1 * x_node_num + x_idx;
+        // idx_out[4 * idx + 2] = y_idx_1 * x_node_num + x_idx;
+        idx_out[4 * idx + 2] = idx_in[idx] + x_node_num;
     }
-    __syncthreads();
 
     if (y_idx_2 < 0) {
         idx_out[4 * idx + 3] = -1;
     } else {
-        idx_out[4 * idx + 3] = y_idx_2 * x_node_num + x_idx;
+        // idx_out[4 * idx + 3] = y_idx_2 * x_node_num + x_idx;
+        idx_out[4 * idx + 3] = idx_in[idx] - x_node_num;
     }
 
     __syncthreads();
 }
 
-__global__ void Ker_Bz_Raise_Neighbour(int* idx_in, int size, float* gpu_z_arr) {
+__global__ void Ker_Bz_Raise_Neighbour(int* idx_in, int size, float* gpu_z_arr, float avg_soil_raise, float bz_ratio) {
     // calculate the idx for the current thread
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     // if out of range, return
     if (idx >= size)
         return;
 
-    gpu_z_arr[idx_in[idx]] += 0.0005;
+    gpu_z_arr[idx_in[idx]] += bz_ratio * avg_soil_raise;
 }
 
 void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int active_size) {
@@ -352,8 +358,8 @@ void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int
 
     int* hit_arr = hit_vertices.data();
 
-    int* gpu_idx_in;   // input index array, including all active vertices from the last loop
-    int* gpu_idx_out;  // output index array containing the neighbour of all 'active_size' vertices
+    int* gpu_idx_in;   // input index array, including all hit vertices from the last loop
+    int* gpu_idx_out;  // output index array containing the neighbour of all 'hit_size' vertices
     int* neighbour_idx = new int[4 * hit_size];
 
     cudaMalloc((int**)&gpu_idx_in, hit_size * sizeof(int));
@@ -361,8 +367,8 @@ void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int
 
     cudaMemcpy(gpu_idx_in, hit_arr, hit_size * sizeof(int), cudaMemcpyHostToDevice);
 
-    int block_size = 256;
-    int n_block = hit_size / 256 + 1;
+    int block_size = 1024;
+    int n_block = hit_size / 1024 + 1;
 
     Ker_Get_Bz_Neighbours<<<n_block, block_size>>>(gpu_idx_in, gpu_idx_out, hit_size, x_n_node, y_n_node);
 
@@ -394,8 +400,11 @@ void BWTerrain::Util_Compute_Bulldozing(int* idx_in, float* displacement_in, int
     cudaMalloc((int**)&gpu_neigh_arr, neigh_size * sizeof(int));
     cudaMemcpy(gpu_neigh_arr, neigh_arr, neigh_size * sizeof(int), cudaMemcpyHostToDevice);
 
+    float avg_soil_raise = tot_displacement / neigh_size;
+
     // Raise Neighourbing Nodes
-    Ker_Bz_Raise_Neighbour<<<n_block, block_size>>>(gpu_neigh_arr, neigh_size, gpu_z_arr);
+    Ker_Bz_Raise_Neighbour<<<n_block, block_size>>>(gpu_neigh_arr, neigh_size, gpu_z_arr, avg_soil_raise,
+                                                    terrain_params->bz_ratio);
 
     cudaFree(gpu_neigh_arr);
 }

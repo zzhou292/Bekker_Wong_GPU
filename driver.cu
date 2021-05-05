@@ -6,7 +6,9 @@
 #include "BWTerrain.cuh"
 
 int main(int argc, char* argv[]) {
-    BWTerrain terrain = BWTerrain(5.f, 5.f, 0.02f);
+    // Note: Currently the minimum resolution tested to be working 0.05f
+    // Experiments have shown that when goes below 0.05f, Bulldozing algorithm has flaws
+    BWTerrain terrain = BWTerrain(5.f, 5.f, 0.05f);
     BWWheel wheel = BWWheel(0.5f, 1.f, 10.f);
     wheel.Initialize(1.0f, 2.5f, 0.5f);
     wheel.acc_z = -9.8;

@@ -9,7 +9,9 @@ typedef struct {
     float n;     // Bekker n exponent
     float f_s;   // static friction coefficient - this coefficient is only an add-on, if set to 0 then only z direction
                  // is considered.
-    float bz_f_angle;  // Bull dozing maximum friction angle
+    float bz_ratio;  // whether to enable bulldozing
+                     // Note: this parameter only becomes effective when the Bulldozing has been turned on
+                     // otherwise does nothing
 } BWParameters;
 
 class BWTerrain {
