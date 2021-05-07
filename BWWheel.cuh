@@ -26,4 +26,5 @@ class BWWheel {
 
     void Initialize(float pos_x_in, float pos_y_in, float pos_z_in);
     void Advance(float time_step);
+    void WriteOutput(std::string FileName);
 };

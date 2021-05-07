@@ -43,7 +43,7 @@ void BWTerrain::Initialize() {
     terrain_params->Kc = 0;
     terrain_params->n = 1.1;
     terrain_params->f_s = 0.0;
-    terrain_params->bz_ratio = 0.2;
+    terrain_params->bz_ratio = 0.3;
 
     // malloc GPU memory for z array
     cudaMalloc((float**)&gpu_x_arr, n_node * sizeof(float));

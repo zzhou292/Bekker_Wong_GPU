@@ -21,15 +21,20 @@ int main(int argc, char* argv[]) {
         wheel.Advance(0.01);
         terrain.Advance(0.01, &wheel);
         if (i < 10) {
-            terrain.WriteOutput("test000" + std::to_string(i));
+            terrain.WriteOutput("ter-000" + std::to_string(i));
+            wheel.WriteOutput("whe-000" + std::to_string(i));
         } else if (i < 100) {
-            terrain.WriteOutput("test00" + std::to_string(i));
+            terrain.WriteOutput("ter-00" + std::to_string(i));
+            wheel.WriteOutput("whe-00" + std::to_string(i));
         } else {
-            terrain.WriteOutput("test0" + std::to_string(i));
+            terrain.WriteOutput("ter-0" + std::to_string(i));
+            wheel.WriteOutput("whe-0" + std::to_string(i));
         }
 
-        std::cout << "pos:" << wheel.pos_x << "," << wheel.pos_y << "," << wheel.pos_z << std::endl;
-        std::cout << "acc_z:" << wheel.acc_z << std::endl;
+        std::cout << "time: " << i * 0.01 << " s" << std::endl;
+        std::cout << "wheel pos:" << wheel.pos_x << "," << wheel.pos_y << "," << wheel.pos_z << std::endl;
+        std::cout << "wheel acc_z:" << wheel.acc_z << std::endl;
+        std::cout << "==============================================" << std::endl;
     }
     terrain.Destroy();
 }
