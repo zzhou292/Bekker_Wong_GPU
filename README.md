@@ -2,6 +2,10 @@
 
 Jason Zhou ME 759 Final Project
 
+Compiling Commands included in 'compile.sh', if on Linux, simply run 'sh compile.sh'
+
+Dependencies include Nvidia Cuda (https://developer.nvidia.com/cuda-toolkit) and c++ boost library (https://www.boost.org/)
+
 This is an initial attempt to bring Bekker-Wong Terrain model into GPU
 
 This implementation targets to achieve:
