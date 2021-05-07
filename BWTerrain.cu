@@ -1,3 +1,7 @@
+// ME 759 Spring 2021 Final Project
+// BWTerrain.cu
+// Author: Jason Zhou
+
 #include <cuda_device_runtime_api.h>
 #include <cuda_runtime.h>
 #include <driver_types.h>
@@ -297,6 +301,7 @@ void BWTerrain::Util_Compute_Internal_Force(int* idx_arr, int idx_arr_size, BWWh
     if (enable_bulldozing)
         cudaMemcpy(displacement_arr, gpu_displacement_arr, idx_arr_size * sizeof(float), cudaMemcpyDeviceToHost);
 
+    // TODO: use GPU to perform reduction instead of calculate sum on CPU
     float sum_force = 0.f;
     for (int i = 0; i < n_node; i++) {
         sum_force += out_force[i];

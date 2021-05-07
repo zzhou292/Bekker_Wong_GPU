@@ -1,3 +1,7 @@
+// ME 759 Spring 2021 Final Project
+// BWWheel.cuh
+// Author: Jason Zhou
+
 #include <math.h>
 #include <string>
 

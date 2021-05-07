@@ -1,3 +1,7 @@
+// ME 759 Spring 2021 Final Project
+// BWTerrain.cuh
+// Author: Jason Zhou
+
 #include <math.h>
 #include <string>
 #include "BWWheel.cuh"
@@ -36,7 +40,7 @@ class BWTerrain {
     int x_n_node;  // number of node along the x direction
     int y_n_node;  // numbder of node along the y direction
 
-    bool enable_bulldozing = true;
+    bool enable_bulldozing = false;  // defaultly set the bulldozing option to false
 
     BWParameters* terrain_params;  // Bekker Wong Terrain parameters
 

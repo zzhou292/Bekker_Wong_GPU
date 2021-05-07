@@ -1,3 +1,6 @@
+// ME 759 Spring 2021 Final Project
+// BWWheel.cu
+// Author: Jason Zhou
 #include "BWWheel.cuh"
 #include <boost/filesystem.hpp>
 #include <fstream>
